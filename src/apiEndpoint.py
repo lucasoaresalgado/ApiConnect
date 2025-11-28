@@ -1,10 +1,36 @@
 from fastapi import FastAPI
 import uvicorn
-from extractScript import run_extraction_thread 
+from extractScript import run_extraction_thread, api_local_key 
 from Catalog import extractions
 import asyncio
 
+
+
 app = FastAPI()
+
+@app.get("/catalog")
+def showCatalog():
+    return [extractions]
+
+@app.get("/data/{name}")
+def showTable(name):
+    if name in extractions:
+       return [extractions[name]]
+    else:
+        return {"status": f"data {name} not found."}
+    
+@app.get("/schedule/{schedule}")
+def showSchedule(schedule: str):
+    results = [
+        {key: value}
+        for key, value in extractions.items()
+        if value.get("schedule") == schedule
+    ]
+    if results:
+        return results
+    else:
+        return {"status": f"schedule {schedule} not found."}
+
 
 @app.post("/extract/all")
 async def exec_call():

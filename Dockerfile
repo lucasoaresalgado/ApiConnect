@@ -1,4 +1,4 @@
-FROM python:3.13
+FROM python:3.13.9-alpine3.22
 
 RUN pip install "fastapi[standard]"
 RUN pip install "uvicorn[standard]"

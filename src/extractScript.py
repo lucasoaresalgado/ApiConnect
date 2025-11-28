@@ -1,4 +1,5 @@
 import os
+import math
 import asyncio
 import aiohttp
 from dotenv import load_dotenv
@@ -8,13 +9,13 @@ import threading
 from datetime import datetime
 import boto3
 from botocore.client import Config
-from io import StringIO
+from io import BytesIO
 
 load_dotenv()
 
+api_local_key = os.getenv("API_LOCAL_KEY")
 api_key = os.getenv("APY_KEY")
 password_db = os.getenv("PASSWORD_DB")
-BATCH_SIZE = 150
 MAX_CONCURRENT_BATCHES = 4
 TIMEOUT = 30
 
@@ -33,55 +34,58 @@ async def fetch_page(session, url, headers):
         log(f"Error fetching {url}: {e}")
         return {"data": []}
 
-async def process_batch(session, batch_urls, headers, name, batch_start, batch_end, last_page):
-    log(f"[{name}] Starting batch {batch_start}-{batch_end}")
-    tasks = [fetch_page(session, url, headers) for url in batch_urls]
-    results = await asyncio.gather(*tasks)
-    batch_data = []
-    for j, resp in enumerate(results):
-        batch_data.extend(resp.get('data', []))
-    log(f"[{name}] Finished batch {batch_start}-{batch_end}")
-    return batch_data
-
 async def extract_data(name):
     prj_id = extractions[name]["project_id"]
     subprj_id = extractions[name]["subproject_id"]
     logic_name = extractions[name]["name"]
     query = extractions[name].get("query", "")
 
-    base_url = f"https://dpms-api.rc1.kaefer.com/api/v1/{logic_name}?project_id={prj_id}&subproject_id={subprj_id}{query}&page="
+    base_url = f"https://dpms-api.rc1.kaefer.com/api/v1/{logic_name}?project_id={prj_id}&subproject_id={subprj_id}{query}"
     headers = {"Authorization": f"Token {api_key}"}
-
-    full_extraction = []
+    all_data = []
 
     async with aiohttp.ClientSession() as session:
-        first_url = base_url + "1"
+        # Fetch first page to get total and page size
+        first_url = f"{base_url}&skip=0"
         first_response = await fetch_page(session, first_url, headers)
-        last_page = first_response.get('total', 1)
-        log(f"[{name}] Request succeeded - processing {last_page} pages...")
+        total = first_response.get('total', 1)
+        data = first_response.get('data', [])
+        all_data.extend(data)
 
-        page_urls = [base_url + str(page) for page in range(1, last_page + 1)]
+        page_size = len(data)
+        if page_size == 0:
+            log(f"[{name}] No data returned on first page.")
+            return
+
+        log(f"[{name}] Total records: {total}, page_size: {page_size}")
+
+        # Calculate number of pages
+        page_count = math.ceil(total / page_size)
+
+        # Prepare skip values for all remaining pages
+        skip_values = [i * page_size for i in range(1, page_count)]
+
+        # Fetch all remaining pages in batches
         batches = [
-            (page_urls[i:i + BATCH_SIZE], i + 1, min(i + BATCH_SIZE, last_page))
-            for i in range(0, len(page_urls), BATCH_SIZE)
+            skip_values[i:i + page_size * MAX_CONCURRENT_BATCHES]
+            for i in range(0, len(skip_values), page_size * MAX_CONCURRENT_BATCHES)
         ]
 
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_BATCHES)
+        for batch in batches:
+            tasks = [
+                fetch_page(session, f"{base_url}&skip={skip}", headers)
+                for skip in batch
+            ]
+            results = await asyncio.gather(*tasks)
+            for resp in results:
+                all_data.extend(resp.get('data', []))
+            log(f"[{name}] Processed batch: skips {batch}")
 
-        async def batch_wrapper(batch_urls, batch_start, batch_end):
-            async with semaphore:
-                return await process_batch(session, batch_urls, headers, name, batch_start, batch_end, last_page)
-
-        batch_tasks = [batch_wrapper(batch_urls, batch_start, batch_end) for batch_urls, batch_start, batch_end in batches]
-        for future in asyncio.as_completed(batch_tasks):
-            batch_data = await future
-            full_extraction.extend(batch_data)
-
-    # Convert to DataFrame and CSV (in memory)
-    df = pd.json_normalize(full_extraction)
-    csv_buffer = StringIO()
-    df.to_csv(csv_buffer, index=False, encoding='utf-8')
-    csv_bytes = csv_buffer.getvalue().encode('utf-8')
+    # Convert to DataFrame and Parquet (in memory)
+    df = pd.json_normalize(all_data)
+    parquet_buffer = BytesIO()
+    df.to_parquet(parquet_buffer, index=False)
+    parquet_bytes = parquet_buffer.getvalue()
 
     # MinIO config
     minioPassword = os.getenv("MINIO_SECRET_KEY")
@@ -91,7 +95,7 @@ async def extract_data(name):
     MINIO_REGION = "kaefer-bra-indaiatuba"
     LANDING_BUCKET = "landing"
     OBJECT_PREFIX = 'dpms'
-    OBJECT_KEY = f"{OBJECT_PREFIX}/{name}.csv"
+    OBJECT_KEY = f"{OBJECT_PREFIX}/{name}.parquet"
 
     try:
         s3_client = boto3.client(
@@ -103,18 +107,18 @@ async def extract_data(name):
             config=Config(signature_version='s3v4')
         )
 
-        # Upload the CSV bytes
+        # Upload the Parquet bytes
         s3_client.put_object(
             Bucket=LANDING_BUCKET,
             Key=OBJECT_KEY,
-            Body=csv_bytes,
-            ContentType='text/csv'
+            Body=parquet_bytes,
+            ContentType='application/octet-stream'
         )
-        log(f"[{name}] ✅ Uploaded CSV to MinIO: s3://{LANDING_BUCKET}/{OBJECT_KEY}")
-        log(f"[{name}] Total records uploaded: {len(full_extraction)}")
+        log(f"[{name}] ✅ Uploaded Parquet to MinIO: s3://{LANDING_BUCKET}/{OBJECT_KEY}")
+        log(f"[{name}] Total records uploaded: {len(all_data)}")
 
     except Exception as e:
-        log(f"[{name}] ❌ Error uploading CSV to MinIO: {e}")
+        log(f"[{name}] ❌ Error uploading Parquet to MinIO: {e}")
 
 async def run_extraction_thread(name):
     await extract_data(name)
