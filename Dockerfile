@@ -1,11 +1,7 @@
 FROM python:3.13.9-alpine3.22
 
-RUN pip install "fastapi[standard]"
-RUN pip install "uvicorn[standard]"
-RUN pip install boto3
-RUN pip install aiohttp
-RUN pip install python-dotenv
-RUN pip install pandas
+# Install necessary packages
+RUN pip install --no-cache-dir "fastapi[standard]" "uvicorn[standard]" boto3 aiohttp python-dotenv pandas pyarrow
 
 EXPOSE 8000
 
