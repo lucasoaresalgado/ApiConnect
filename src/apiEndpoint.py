@@ -4,8 +4,6 @@ from extractScript import run_extraction_thread, api_local_key
 from Catalog import extractions
 import asyncio
 
-
-
 app = FastAPI()
 
 @app.get("/catalog")
