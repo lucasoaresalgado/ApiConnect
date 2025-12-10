@@ -4,12 +4,12 @@ import asyncio
 import aiohttp
 from dotenv import load_dotenv
 from Catalog import extractions
-import pandas as pd
 import threading
 from datetime import datetime
 import boto3
 from botocore.client import Config
 from io import BytesIO
+import json
 
 load_dotenv()
 
@@ -81,35 +81,16 @@ async def extract_data(name):
                 all_data.extend(resp.get('data', []))
             log(f"[{name}] Processed batch: skips {batch}")
 
-    # Convert to DataFrame
-    df = pd.json_normalize(all_data)
-    parquet_buffer = BytesIO()
+    # Save all_data directly as JSON
     OBJECT_PREFIX = 'dpms'
-    OBJECT_KEY_PARQUET = f"{OBJECT_PREFIX}/{name}.parquet"
     OBJECT_KEY_JSON = f"{OBJECT_PREFIX}/{name}.json"
 
-    # Try to save as Parquet, else save as JSON
-    try:
-        df.to_parquet(parquet_buffer, index=False)
-        parquet_bytes = parquet_buffer.getvalue()
-        file_type = "parquet"
-        file_bytes = parquet_bytes
-        object_key = OBJECT_KEY_PARQUET
-        log(f"[{name}] Parquet conversion successful.")
-    except Exception as e:
-        log(f"[{name}] ❌ Error converting to Parquet: {e}")
-        log(f"[{name}] DataFrame dtypes: {df.dtypes}")
-        log(f"[{name}] Sample data: {df.head().to_dict()}")
-        # Save as JSON instead
-        json_buffer = BytesIO()
-        # Use orient="records" for row-wise JSON
-        json_str = df.to_json(orient="records", force_ascii=False)
-        json_buffer.write(json_str.encode("utf-8"))
-        json_buffer.seek(0)
-        file_type = "json"
-        file_bytes = json_buffer.getvalue()
-        object_key = OBJECT_KEY_JSON
-        log(f"[{name}] Saved as JSON.")
+    json_buffer = BytesIO()
+    json_str = json.dumps(all_data, ensure_ascii=False)
+    json_buffer.write(json_str.encode("utf-8"))
+    json_buffer.seek(0)
+    file_bytes = json_buffer.getvalue()
+    object_key = OBJECT_KEY_JSON
 
     # MinIO config
     minioPassword = os.getenv("MINIO_SECRET_KEY")
@@ -129,18 +110,17 @@ async def extract_data(name):
             config=Config(signature_version='s3v4')
         )
 
-        # Upload the file (either Parquet or JSON)
         s3_client.put_object(
             Bucket=LANDING_BUCKET,
             Key=object_key,
             Body=file_bytes,
-            ContentType='application/octet-stream' if file_type == "parquet" else 'application/json'
+            ContentType='application/json'
         )
-        log(f"[{name}] ✅ Uploaded {file_type.upper()} to MinIO: s3://{LANDING_BUCKET}/{object_key}")
+        log(f"[{name}] ✅ Uploaded JSON to MinIO: s3://{LANDING_BUCKET}/{object_key}")
         log(f"[{name}] Total records uploaded: {len(all_data)}")
 
     except Exception as e:
-        log(f"[{name}] ❌ Error uploading {file_type.upper()} to MinIO: {e}")
+        log(f"[{name}] ❌ Error uploading JSON to MinIO: {e}")
 
 async def run_extraction_thread(name):
     await extract_data(name)
