@@ -16,6 +16,8 @@ load_dotenv()
 api_local_key = os.getenv("API_LOCAL_KEY")
 api_key = os.getenv("APY_KEY")
 password_db = os.getenv("PASSWORD_DB")
+dns = os.getenv("DPMS_API_DNS")
+
 MAX_CONCURRENT_BATCHES = 4
 TIMEOUT = 30
 
@@ -40,7 +42,7 @@ async def extract_data(name):
     logic_name = extractions[name]["name"]
     query = extractions[name].get("query", "")
 
-    base_url = f"https://dpms-api.rc1.kaefer.com/api/v1/{logic_name}?project_id={prj_id}&subproject_id={subprj_id}{query}"
+    base_url = f"https://{dns}/api/v1/{logic_name}?project_id={prj_id}&subproject_id={subprj_id}{query}"
     headers = {"Authorization": f"Token {api_key}"}
     all_data = []
 
@@ -82,7 +84,7 @@ async def extract_data(name):
             log(f"[{name}] Processed batch: skips {batch}")
 
     # Save all_data directly as JSON
-    OBJECT_PREFIX = 'dpms'
+    OBJECT_PREFIX = 'prjctsys'
     OBJECT_KEY_JSON = f"{OBJECT_PREFIX}/{name}.json"
 
     json_buffer = BytesIO()
@@ -94,33 +96,33 @@ async def extract_data(name):
 
     # MinIO config
     minioPassword = os.getenv("MINIO_SECRET_KEY")
-    MINIO_ENDPOINT = "http://10.247.81.220:29000"
-    MINIO_ACCESS_KEY = "admin"
-    MINIO_SECRET_KEY = minioPassword
-    MINIO_REGION = "kaefer-bra-indaiatuba"
-    LANDING_BUCKET = "landing"
+    minioEndpoint = os.getenv("MINIO_ENDPOINT")
+    minioUser = os.getenv("MINIO_ACCESS_KEY")
+    minioPassword = os.getenv("MINIO_SECRET_KEY")
+    minioRegion = "corporate-bra-indaiatuba"
+    landingBucket = "landing"
 
     try:
         s3_client = boto3.client(
             's3',
-            aws_access_key_id=MINIO_ACCESS_KEY,
-            aws_secret_access_key=MINIO_SECRET_KEY,
-            endpoint_url=MINIO_ENDPOINT,
-            region_name=MINIO_REGION,
+            aws_access_key_id=minioUser,
+            aws_secret_access_key=minioPassword,
+            endpoint_url=minioEndpoint,
+            region_name=minioRegion,
             config=Config(signature_version='s3v4')
         )
 
         s3_client.put_object(
-            Bucket=LANDING_BUCKET,
+            Bucket=landingBucket,
             Key=object_key,
             Body=file_bytes,
             ContentType='application/json'
         )
-        log(f"[{name}] ✅ Uploaded JSON to MinIO: s3://{LANDING_BUCKET}/{object_key}")
+        log(f"[{name}] Uploaded JSON to MinIO: s3://{landingBucket}/{object_key}")
         log(f"[{name}] Total records uploaded: {len(all_data)}")
 
     except Exception as e:
-        log(f"[{name}] ❌ Error uploading JSON to MinIO: {e}")
+        log(f"[{name}] Error uploading JSON to MinIO: {e}")
 
 async def run_extraction_thread(name):
     await extract_data(name)
